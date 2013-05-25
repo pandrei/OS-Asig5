@@ -1,14 +1,3 @@
-/*
- * epoll-based echo server. Uses epoll(7) to multiplex connections.
- *
- * TODO:
- *  - block data receiving when receive buffer is full (use circular buffers)
- *  - do not copy receive buffer into send buffer when send buffer data is
- *      still valid
- *
- * 2011, Operating Systems
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,11 +9,15 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "aws.h"
-#include "util.h"
-#include "debug.h"
-#include "sock_util.h"
-#include "w_epoll.h"
+#include <stdarg.h>
+#include "includes/aws.h"
+#include "includes/util.h"
+#include "includes/debug.h"
+#include "includes/sock_util.h"
+#include "includes/w_epoll.h"
+#include "includes/http_parser.h"
+#include <sys/sendfile.h>
+#include <fcntl.h>	/* O_CREAT, O_RDONLY */
 
 /* server socket file descriptor */
 static int listenfd;
@@ -49,6 +42,75 @@ struct connection {
 	enum connection_state state;
 };
 
+char buffer[BUFSIZ] =
+		"HTTP/1.1 200 OK\r\n"
+				"Date: Sun, 08 May 2011 09:26:16 GMT\r\n"
+				"Server: Apache/2.2.9\r\n"
+				"Last-Modified: Mon, 02 Aug 2010 17:55:28 GMT\r\n"
+				"Accept-Ranges: bytes\r\n"
+				"Content-Length: 153\r\n"
+				"Vary: Accept-Encoding\r\n"
+				"Connection: close\r\n"
+				"Content-Type: text/html\r\n"
+				"\r\n"
+				"<html><head><meta name=\"google-site-verification\" content=\"gTsIxyV43HSJraRPl6X1A5jzGFgQ3N__hKAcuL2QsO8\" /></head>"
+				"<body><h1>It works!</h1></body></html>\r\n";
+
+const char err_404[BUFSIZ] =
+		"HTTP/1.1 404 Not Found\r\n"
+				"Date: Sun, 08 May 2011 09:26:16 GMT\r\n"
+				"Server: Apache/2.2.9\r\n"
+				"Last-Modified: Mon, 02 Aug 2010 17:55:28 GMT\r\n"
+				"Accept-Ranges: bytes\r\n"
+				"Content-Length: 153\r\n"
+				"Vary: Accept-Encoding\r\n"
+				"Connection: close\r\n"
+				"Content-Type: text/html\r\n"
+				"\r\n"
+				"<html><head><meta name=\"google-site-verification\" content=\"gTsIxyV43HSJraRPl6X1A5jzGFgQ3N__hKAcuL2QsO8\" /></head>"
+				"<body><h1>Error 404: Page not found</h1></body></html>\r\n";
+/*
+const char err_404[] ="HTTP/1.1 404 Not Found"
+"Connection: close"
+"Content-Type: text/html"
+
+"<html>"
+  "<body>"
+      "Error 404: Page not Found"
+  "</body>"
+"</html>";
+*/
+static http_parser request_parser;
+static char request_path[BUFSIZ];	/* storage for request_path */
+
+
+/*
+ * Callback is invoked by HTTP request parser when parsing request path.
+ * Request path is stored in global request_path variable.
+ */
+
+static int on_path_cb(http_parser *p, const char *buf, size_t len)
+{
+	assert(p == &request_parser);
+	memcpy(request_path, buf, len);
+
+	return 0;
+}
+
+static http_parser_settings settings_on_path = {
+	/* on_message_begin */ 0,
+	/* on_header_field */ 0,
+	/* on_header_value */ 0,
+	/* on_path */ on_path_cb,
+	/* on_url */ 0,
+	/* on_fragment */ 0,
+	/* on_query_string */ 0,
+	/* on_body */ 0,
+	/* on_headers_complete */ 0,
+	/* on_message_complete */ 0
+};
+
+
 /*
  * Initialize connection structure on given socket.
  */
@@ -68,13 +130,13 @@ static struct connection *connection_create(int sockfd)
 /*
  * Copy receive buffer to send buffer (echo).
  */
-
+/*
 static void connection_copy_buffers(struct connection *conn)
 {
 	conn->send_len = conn->recv_len;
 	memcpy(conn->send_buffer, conn->recv_buffer, conn->send_len);
 }
-
+*/
 /*
  * Remove connection handler.
  */
@@ -168,19 +230,6 @@ static enum connection_state send_message(struct connection *conn)
 	ssize_t bytes_sent;
 	int rc;
 	char abuffer[64];
-	char buffer[BUFSIZ] = "HTTP/1.1 200 OK\r\n"
-		"Date: Sun, 08 May 2011 09:26:16 GMT\r\n"
-		"Server: Apache/2.2.9\r\n"
-		"Last-Modified: Mon, 02 Aug 2010 17:55:28 GMT\r\n"
-		"Accept-Ranges: bytes\r\n"
-		"Content-Length: 153\r\n"
-		"Vary: Accept-Encoding\r\n"
-		"Connection: close\r\n"
-		"Content-Type: text/html\r\n"
-		"\r\n"
-		"<html><head><meta name=\"google-site-verification\" content=\"gTsIxyV43HSJraRPl6X1A5jzGFgQ3N__hKAcuL2QsO8\" /></head>"
-		"<body><h1>It works!</h1></body></html>\r\n";
-
 
 	rc = get_peer_address(conn->sockfd, abuffer, 64);
 	if (rc < 0) {
@@ -188,7 +237,7 @@ static enum connection_state send_message(struct connection *conn)
 		goto remove_connection;
 	}
 
-	bytes_sent = send(conn->sockfd, buffer, strlen(buffer), 0);
+	bytes_sent = send(conn->sockfd, conn->send_buffer, strlen(conn->send_buffer), 0);
 	if (bytes_sent < 0) {		/* error in communication */
 		dlog(LOG_ERR, "Error in communication to %s\n", abuffer);
 		goto remove_connection;
@@ -224,17 +273,54 @@ remove_connection:
  * Handle a client request on a client connection.
  */
 
-static void handle_client_request(struct connection *conn)
-{
-	int rc;
+static void handle_client_request(struct connection *conn) {
+	int rc, fd;
+	struct stat stat_buf;
 	enum connection_state ret_state;
-
+	size_t bytes_parsed;
+	char realpath[BUFSIZ + 1];
+	//-6-7
 	ret_state = receive_message(conn);
 	if (ret_state == STATE_CONNECTION_CLOSED)
 		return;
+	http_parser_init(&request_parser, HTTP_REQUEST);
 
-	connection_copy_buffers(conn);
-
+	strcpy(request_path, "");
+	bytes_parsed = http_parser_execute(&request_parser, &settings_on_path,
+			conn->recv_buffer, strlen(conn->recv_buffer));
+	//printf("Parsed complex HTTP request (bytes: %lu), path: %s\n", bytes_parsed,
+	//		request_path);
+	//connection_copy_buffers(conn);
+	if (strncmp(request_path, "/static", 7) != 0
+			&& strncmp(request_path, "/dynamic", 8) != 0) {
+		strcpy(conn->send_buffer, err_404);
+	} else {
+		if (strncmp(request_path, "/static", 7) == 0) {
+			//printf("Branched STATIC FOLDER\n");
+			strcpy(realpath, ".");
+			strcat(realpath, request_path);
+			fd = open(realpath, O_RDONLY);
+			fstat(fd, &stat_buf);
+			if (fd < 0) {
+				//printf("Failed to open folder\n");
+				strcpy(conn->send_buffer, err_404);
+				rc = w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
+				return;
+			} else {
+				//printf("Sending file\n");
+				sendfile(conn->sockfd, fd, NULL, stat_buf.st_size);
+				printf("Sent file\n");
+				close(fd);
+				rc = w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
+				return;
+			}
+		} else if (strncmp(request_path, "/dnyamic", 8) == 0) {
+			strcpy(realpath, ".");
+			strcat(realpath, request_path);
+		}
+		strcpy(conn->send_buffer, buffer);
+		return;
+	}
 	/* add socket to epoll for out events */
 	rc = w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_add_ptr_inout");
@@ -256,6 +342,7 @@ int main(void)
 	DIE(rc < 0, "w_epoll_add_fd_in");
 
 	dlog(LOG_INFO, "Server waiting for connections on port %d\n", AWS_LISTEN_PORT);
+
 
 	/* server main loop */
 	while (1) {

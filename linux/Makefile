@@ -7,16 +7,17 @@ build: all
 
 all: aws
 
-aws: aws.o sock_util.o
+aws: aws.o includes/sock_util.o includes/http_parser.o
 
-aws.o: aws.c sock_util.h debug.h util.h
+aws.o: aws.c includes/sock_util.h includes/debug.h includes/util.h includes/http_parser.h
 
-sock_util.o: sock_util.c sock_util.h debug.h util.h
+includes/sock_util.o: includes/sock_util.c includes/sock_util.h includes/debug.h includes/util.h
 
-http-parser/http_parser.o: http-parser/http_parser.c  http-parser/http_parser.h
-	make -C http_parser/http_parser.o
+includes/http_parser.o: includes/http_parser.c  includes/http_parser.h
+	make -C includes http_parser.o
 
 clean:
 	-rm -f *~
-	-rm -f *.o
+	-rm -f includes/*.o
 	-rm -f aws
+
