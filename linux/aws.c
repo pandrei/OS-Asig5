@@ -26,9 +26,6 @@
 #include "sock_util.h"
 #include "w_epoll.h"
 
-#define ECHO_LISTEN_PORT		8888
-
-
 /* server socket file descriptor */
 static int listenfd;
 
@@ -169,9 +166,8 @@ remove_connection:
 static enum connection_state send_message(struct connection *conn)
 {
 	ssize_t bytes_sent;
-	char abuffer[64];
 	int rc;
-
+	char abuffer[64];
 	char buffer[BUFSIZ] = "HTTP/1.1 200 OK\r\n"
 		"Date: Sun, 08 May 2011 09:26:16 GMT\r\n"
 		"Server: Apache/2.2.9\r\n"
@@ -184,6 +180,7 @@ static enum connection_state send_message(struct connection *conn)
 		"\r\n"
 		"<html><head><meta name=\"google-site-verification\" content=\"gTsIxyV43HSJraRPl6X1A5jzGFgQ3N__hKAcuL2QsO8\" /></head>"
 		"<body><h1>It works!</h1></body></html>\r\n";
+
 
 	rc = get_peer_address(conn->sockfd, abuffer, 64);
 	if (rc < 0) {
@@ -213,7 +210,7 @@ static enum connection_state send_message(struct connection *conn)
 
 	return STATE_DATA_SENT;
 
-	remove_connection:
+remove_connection:
 	rc = w_epoll_remove_ptr(epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_remove_ptr");
 
@@ -229,49 +226,18 @@ static enum connection_state send_message(struct connection *conn)
 
 static void handle_client_request(struct connection *conn)
 {
-	ssize_t bytes_recv;
-	char buffer[BUFSIZ];
-	char abuffer[64];
 	int rc;
 	enum connection_state ret_state;
 
 	ret_state = receive_message(conn);
 	if (ret_state == STATE_CONNECTION_CLOSED)
 		return;
-	rc = get_peer_address(conn->sockfd, abuffer, 64);
-	if (rc < 0) {
-		ERR("get_peer_address");
-		goto remove_connection;
-	}
 
-	bytes_recv = recv(conn->sockfd, buffer, BUFSIZ, 0);
-
-	if (bytes_recv < 0) {		/* error in communication */
-		dlog(LOG_ERR, "Error in communication from %s\n", abuffer);
-		goto remove_connection;
-	}
-	if (bytes_recv == 0) {		/* connection closed */
-		dlog(LOG_INFO, "Connection closed from %s\n", abuffer);
-		goto remove_connection;
-	}
-
-	dlog(LOG_INFO, "Received message from %s\n", abuffer);
-
-	printf("--\n%s--\n", buffer);
-
-
-	//connection_copy_buffers(conn);
+	connection_copy_buffers(conn);
 
 	/* add socket to epoll for out events */
 	rc = w_epoll_update_ptr_inout(epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_add_ptr_inout");
-
-	return;
-
-	remove_connection:
-	/* close local socket */
-	close(conn->sockfd);
-	return;
 }
 
 int main(void)
@@ -283,47 +249,27 @@ int main(void)
 	DIE(epollfd < 0, "w_epoll_create");
 
 	/* create server socket */
-	listenfd = tcp_create_listener(ECHO_LISTEN_PORT, DEFAULT_LISTEN_BACKLOG);
+	listenfd = tcp_create_listener(AWS_LISTEN_PORT, DEFAULT_LISTEN_BACKLOG);
 	DIE(listenfd < 0, "tcp_create_listener");
 
 	rc = w_epoll_add_fd_in(epollfd, listenfd);
 	DIE(rc < 0, "w_epoll_add_fd_in");
 
-	dlog(LOG_INFO, "Server waiting for connections on port %d\n", ECHO_LISTEN_PORT);
+	dlog(LOG_INFO, "Server waiting for connections on port %d\n", AWS_LISTEN_PORT);
 
 	/* server main loop */
-
 	while (1) {
 		struct epoll_event rev;
 
+		/* wait for events */
 		rc = w_epoll_wait_infinite(epollfd, &rev);
 		DIE(rc < 0, "w_epoll_wait_infinite");
 
-		if (rev.data.fd == listenfd) {
-			dlog(LOG_DEBUG, "New connection\n");
-			if (rev.events & EPOLLIN)
-				handle_new_connection();
-		} else {
-			if (rev.events & EPOLLIN) {
-				dlog(LOG_DEBUG, "New message\n");
-				handle_client_request(rev.data.ptr);
-			}
-			if (rev.events & EPOLLOUT) {
-				printf("Sending message back\n");
-				send_message(rev.data.ptr);
-			}
-		}
-	}
-
-	/*
-	 *
-	while (1) {
-		struct epoll_event rev;
-
-		rc = w_epoll_wait_infinite(epollfd, &rev);
-		DIE(rc < 0, "w_epoll_wait_infinite");
-
-
+		/*
+		 * switch event types; consider
+		 *   - new connection requests (on server socket)
+		 *   - socket communication (on connection sockets)
+		 */
 
 		if (rev.data.fd == listenfd) {
 			dlog(LOG_DEBUG, "New connection\n");
@@ -335,13 +281,12 @@ int main(void)
 				dlog(LOG_DEBUG, "New message\n");
 				handle_client_request(rev.data.ptr);
 			}
-
 			if (rev.events & EPOLLOUT) {
 				dlog(LOG_DEBUG, "Ready to send message\n");
 				send_message(rev.data.ptr);
 			}
 		}
 	}
-*/
+
 	return 0;
 }
