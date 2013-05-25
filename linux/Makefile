@@ -5,11 +5,11 @@ CFLAGS = -Wall -g
 
 build: all
 
-all: main_http_server
+all: aws
 
-main_http_server: main_http_server.o sock_util.o
+aws: aws.o sock_util.o
 
-main_http_server.o: main_http_server.c sock_util.h debug.h util.h
+aws.o: aws.c sock_util.h debug.h util.h
 
 sock_util.o: sock_util.c sock_util.h debug.h util.h
 
@@ -19,4 +19,4 @@ http-parser/http_parser.o: http-parser/http_parser.c  http-parser/http_parser.h
 clean:
 	-rm -f *~
 	-rm -f *.o
-	-rm -f main_http_server
+	-rm -f aws
