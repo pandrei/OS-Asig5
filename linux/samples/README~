@@ -26,7 +26,7 @@ on port 48484.
 $ ./epoll_echo_server
 
 # on the second, third, ... console
-$ telnet localhost 42424
+$ telnet localhost 48484
 
 The server uses epoll for multiplexing connections and receiving
 notifications (input - EPOLLIN and output - EPOLLOUT). A specialized
